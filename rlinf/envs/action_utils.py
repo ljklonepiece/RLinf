@@ -101,6 +101,25 @@ def prepare_actions_for_isaaclab(
     return chunk_actions
 
 
+def prepare_actions_for_isaaclab_arena(
+    raw_chunk_actions,
+    model_type,
+):
+    """Prepare actions for IsaacLab-Arena (G1).
+
+    The G1 ``g1``/``g1_gr00t`` embodiment uses a 35-d joint-space action (arms/hands/waist +
+    base height + navigate command); the model already emits this exact layout (see
+    ``convert_to_isaaclab_arena_g1_action_n1d7``). There is no binary gripper to remap
+    (the hands are joint-controlled), so the only adaptation is numpy -> torch (IsaacLab's
+    ``action_manager.process_action`` calls ``action.to(device)``).
+    """
+    return (
+        torch.from_numpy(raw_chunk_actions)
+        if isinstance(raw_chunk_actions, np.ndarray)
+        else raw_chunk_actions
+    )
+
+
 def prepare_actions_for_polaris(
     raw_chunk_actions,
     model_type,
@@ -320,6 +339,11 @@ def prepare_actions(
         chunk_actions = raw_chunk_actions
     elif env_type == SupportedEnvType.ISAACLAB:
         chunk_actions = prepare_actions_for_isaaclab(
+            raw_chunk_actions=raw_chunk_actions,
+            model_type=model_type,
+        )
+    elif env_type == SupportedEnvType.ISAACLAB_ARENA:
+        chunk_actions = prepare_actions_for_isaaclab_arena(
             raw_chunk_actions=raw_chunk_actions,
             model_type=model_type,
         )

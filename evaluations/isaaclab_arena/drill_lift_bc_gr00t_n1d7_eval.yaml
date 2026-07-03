@@ -1,0 +1,87 @@
+# Closed-loop BC evaluation: public GR00T N1.7 drill_lift BC checkpoint on the IsaacLab-Arena
+# G1 "drill_lift" task. PURE BC policy (no DSRL) -> drill_lift success rate over N episodes.
+# This is S4.4 (select the best BC checkpoint as the frozen DSRL base for S5) and doubles as the
+# first real end-to-end run of the decoupled RLinf IsaacLab-Arena G1 suite (S3 stack).
+#
+# Prereq: the Arena env server (py3.12) must be running on the eval node (it hosts Isaac Sim;
+# the RLinf env worker connects over a socket -- see env.eval.init_params.server):
+#   ARENA_PORT=5557 ARENA_ENV=LMDrillLiftRlD1 ARENA_NUM_ENVS=<N> \
+#     /home/juekunl/Work/arena_local_bringup/run_arena_server.sh
+#
+# Run one checkpoint (loop over checkpoint-{2000,4000,6000,8000,10000} for the sweep):
+#   bash evaluations/run_eval.sh isaaclab_arena drill_lift_bc_gr00t_n1d7_eval \
+#     rollout.model.model_path=/mnt/amlfs-07/shared/juekunl/ckpts/drill_lift_bc_gr00t_n1d7/drill_lift_bc_n1d7/checkpoint-10000
+
+defaults:
+  - env/isaaclab_arena_drill_lift@env.eval
+  - model/gr00t_n1d7@rollout.model
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    # Single GPU / single process: the Arena server is single-client (listen(1)) and
+    # hosts exactly one env, so env_world_size must be 1 (must divide total_num_envs=1).
+    env,rollout: 0-0
+
+runner:
+  task_type: embodied_eval
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "drill_lift_bc_gr00t_n1d7_eval"
+    logger_backends: ["tensorboard"]
+  max_epochs: 1
+  max_steps: -1
+  only_eval: True
+  val_check_interval: -1
+  save_interval: -1
+  resume_dir: null
+  ckpt_path: null
+
+env:
+  group_name: "EnvGroup"
+  eval:
+    # IQL parity: ~105 episodes, num-envs 1. total_episodes ~= total_num_envs * rollout_epoch.
+    # Start safe with a single Isaac Sim env x many epochs; raise total_num_envs once the Arena
+    # server's vectorization is confirmed on the cluster (TODO S4.4b).
+    rollout_epoch: 105
+    total_num_envs: 1
+    auto_reset: True
+    ignore_terminations: False    # respect success/timeout termination so success rate is real
+    max_episode_steps: 400        # drill_lift horizon (TODO: confirm against the Arena task)
+    group_size: 1
+    is_eval: True
+    video_cfg:
+      save_video: True
+      video_base_dir: ${runner.logger.log_path}/video/eval
+    init_params:
+      num_envs: 1
+      server:
+        port: 5557
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: False
+  enable_offload: False
+  pipeline_stage_num: 1
+
+  model:
+    # Overridden per-checkpoint on the CLI (rollout.model.model_path=...checkpoint-XXXX).
+    model_path: /mnt/amlfs-07/shared/juekunl/ckpts/drill_lift_bc_gr00t_n1d7/drill_lift_bc_n1d7/checkpoint-10000
+    backbone_model_path: /mnt/amlfs-07/shared/juekunl/models/nvidia/Cosmos-Reason2-2B
+    model_type: "gr00t_n1d7"
+    embodiment_tag: "isaaclab_arena_g1"
+    obs_converter_type: "isaaclab_arena_g1"
+    action_dim: 35
+    num_action_chunks: 8
+    denoising_steps: 4
+    # use_dsrl intentionally NOT set -> pure BC policy (predict_action_batch BC denoise path).

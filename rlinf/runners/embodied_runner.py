@@ -478,9 +478,14 @@ class EmbodiedRunner:
         if self.cfg.runner.get("use_training_pipeline", False):
             return self.run_pipeline()
 
+        # Dry run (pre-submit gate): build everything, do exactly ONE rollout + ONE actor
+        # update, skip val/eval/checkpoint, then exit cleanly. Validates the full pipeline
+        # locally (num_nodes=1) without launching a real train/eval job.
+        dry_run = bool(self.cfg.runner.get("dry_run", False))
         start_step = self.global_step
         start_time = time.time()
-        for _step in range(start_step, self.max_steps):
+        last_step = start_step + 1 if dry_run else self.max_steps
+        for _step in range(start_step, last_step):
             # set global step
             self.actor.set_global_step(self.global_step)
             self.rollout.set_global_step(self.global_step)
@@ -540,7 +545,9 @@ class EmbodiedRunner:
                     env_bootstrap_handle.wait()
 
                 self.global_step += 1
-                eval_metrics = self._maybe_eval_and_checkpoint(_step)
+                eval_metrics = (
+                    {} if dry_run else self._maybe_eval_and_checkpoint(_step)
+                )
 
             if profiled_step is not None:
                 self._close_profiling_window(profiled_step)
@@ -558,6 +565,11 @@ class EmbodiedRunner:
                 eval_metrics=eval_metrics,
             )
 
+        if dry_run:
+            self.logger.info(
+                "DRY RUN OK: built workers + env + model, ran 1 rollout and 1 actor "
+                "update, skipped val/eval/checkpoint."
+            )
         self._finish_run()
 
     def run_pipeline(self):

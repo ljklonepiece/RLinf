@@ -1302,6 +1302,12 @@ install_gr00t_n1d7_model() {
             install_maniskill_libero_env
             install_flash_attn
             ;;
+        dummy)
+            # IsaacLab-Arena runs out-of-process over a socket (Option B), so the
+            # RLinf venv needs no in-process sim env -- just flash-attn for the
+            # GR00T backbone. Used for Arena closed-loop eval and DSRL.
+            install_flash_attn
+            ;;
         *)
             echo "Environment '$ENV_NAME' is not yet validated for Gr00t N1.7." >&2
             exit 1

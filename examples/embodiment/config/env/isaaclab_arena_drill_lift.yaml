@@ -1,0 +1,53 @@
+env_type: isaaclab_arena
+total_num_envs: null
+auto_reset: False
+ignore_terminations: False
+use_rel_reward: False  # unused in this env's step path; reward comes from init_params.reward_mode
+seed: 0
+group_size: 1
+
+reward_coef: 1.0
+use_fixed_reset_state_ids: False
+max_steps_per_rollout_epoch: 256
+max_episode_steps: 256  # max episode steps for truncation
+
+video_cfg:
+  save_video: False
+  info_on_video: True
+  fps: 20
+  video_base_dir: ${runner.logger.log_path}/video/train
+
+init_params:
+  id: "LMDrillLiftRlD1"  # Arena env class; selects task + assets (see REGISTER_ISAACLAB_ARENA_ENVS)
+  num_envs: null
+  device: "cuda:0"        # sim device, INSIDE the out-of-process Arena server (py3.12)
+  proxy_device: "cpu"     # device for obs/reward tensors on the RLinf side (py3.11)
+  max_episode_steps: ${env.train.max_episode_steps}
+  task_description: "Pick up the power drill from the table and lift it."
+
+  # Reward formulation (generic, task-agnostic default = sparse):
+  #   sparse -> reward = the env's 'success' termination term (object lifted & grasped),
+  #            1.0 on the success step else 0.0. Matches gr00t's IQL reward_mode=sparse
+  #            and makes RLinf's success metric (step_reward>0) coincide with true success.
+  #   shaped -> reward = Arena's dense per-step reward (approach/reach/lift/grasp/penalty).
+  reward_mode: sparse
+
+  # --- Option B: out-of-process Arena server (the env worker stays py3.11) -----
+  # Arena (isaaclab==4.6.5) needs py3.12 and cannot join RLinf's py3.11 Ray cluster
+  # (Python minor-version parity; see EXPERIMENTS.md S0.4). So the sim runs in its own
+  # py3.12 process and this RLinf env worker drives it over a local socket
+  # (arena_client.ArenaSocketEnv). IMPORTANT: do NOT set python_interpreter_path on
+  # the env node group -- the env worker is a plain py3.11 socket client.
+  server:
+    # Mode 1 (default): connect to an already-running Arena server (cluster /
+    # posttrain-style, or the local docker helper started by hand).
+    host: "127.0.0.1"
+    port: 5557
+    connect_timeout: 600.0   # seconds to wait for the server to accept
+
+    # Mode 2: auto-spawn a local server, then connect once it publishes its bound
+    # port to ready_file. Flip auto_spawn to True and provide spawn_cmd + ready_file,
+    # e.g. the docker launcher (which sets ISAACLAB_ARENA_PATH + the Arena venv):
+    auto_spawn: False
+    spawn_cmd: null          # e.g. ["bash", "/abs/arena_local_bringup/run_arena_server.sh"]
+    ready_file: null         # e.g. "/abs/arena_local_bringup/arena_server.ready"

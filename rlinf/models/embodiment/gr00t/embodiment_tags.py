@@ -55,6 +55,27 @@ class EmbodimentTag(Enum):
     BEHAVIOR_R1_PRO = "behavior_r1_pro"
     """The Behavior R1 Pro robot."""
 
+    ISAACLAB_ARENA_G1 = "unitree_g1_full_body_with_waist_height_nav_cmd"
+    """IsaacLab-Arena Unitree G1 (full body + waist + height + nav command, 35-d action).
+
+    The *value* is the GR00T embodiment key that the public Isaac-GR00T ``UNITREE_G1``
+    finetune writes into the checkpoint's modality config / ``dataset_statistics.json``,
+    so the model's normalization lookup ``modality_configs[embodiment_tag.value]`` resolves.
+    The RLinf-side obs/action format converters are keyed separately by ``obs_converter_type``
+    (``"isaaclab_arena_g1"``), so they are unaffected by this value.
+    """
+
+    ISAACLAB_ARENA_G1_EEF = "real_g1_relative_eef_relative_joints"
+    """PUBLIC GR00T N1.7 base's only shipped G1 embodiment (relative-eef + relative-joints).
+
+    PLUMBING ONLY. The released ``nvidia/GR00T-N1.7-3B`` base ships modality/stats for this
+    eef-based G1 (so ``modality_configs[value]`` resolves) but NOT the real Arena
+    ``unitree_g1_full_body_with_waist_height_nav_cmd``. Pair with
+    ``obs_converter_type="isaaclab_arena_g1_eef"`` to drive the full RLinf<->Arena<->GR00T
+    loop on the *public* base for a sign-of-life run (the policy is untrained for drill_lift).
+    A real drill_lift policy uses ``ISAACLAB_ARENA_G1`` + a finetuned ckpt instead.
+    """
+
     NEW_EMBODIMENT = "new_embodiment"
     """Any new embodiment used during post-training."""
 
@@ -72,5 +93,7 @@ EMBODIMENT_TAG_MAPPING = {
     EmbodimentTag.GR1.value: 24,
     EmbodimentTag.MANISKILL_WIDOWX.value: 30,
     EmbodimentTag.ISAACLAB_FRANKA.value: 31,
+    EmbodimentTag.ISAACLAB_ARENA_G1.value: 25,
+    EmbodimentTag.ISAACLAB_ARENA_G1_EEF.value: 25,
     EmbodimentTag.NEW_EMBODIMENT.value: 10,
 }

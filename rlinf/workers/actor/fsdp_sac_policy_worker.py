@@ -60,6 +60,22 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         self.update_step = 0
         self.enable_drq = bool(getattr(self.cfg.actor, "enable_drq", False))
 
+    def _resolve_use_dsrl(self) -> bool:
+        """Model-agnostic DSRL flag.
+
+        DSRL (diffusion-steering SAC) is configured per model under different keys:
+        openpi nests it as ``model.openpi.use_dsrl``, GR00T as
+        ``model.rl_head_config.use_dsrl``. Also honor a top-level ``model.use_dsrl``.
+        Returns True if any of them is set, so this worker drives any DSRL-capable model
+        (openpi, gr00t_n1d7, ...) through the same SAC code path.
+        """
+        model_cfg = self.cfg.actor.model
+        for section_key in ("openpi", "rl_head_config"):
+            section = model_cfg.get(section_key, {}) or {}
+            if section.get("use_dsrl", False):
+                return True
+        return bool(model_cfg.get("use_dsrl", False))
+
     def init_worker(self):
         self.setup_model_and_optimizer(initialize_target=True)
         self.setup_sac_components()
@@ -109,7 +125,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
             self.target_model.requires_grad_(False)
             self.target_model_initialized = True
 
-        self.use_dsrl = self.cfg.actor.model.get("openpi", {}).get("use_dsrl", False)
+        self.use_dsrl = self._resolve_use_dsrl()
         use_dsrl = self.use_dsrl
         if use_dsrl:
             # DSRL: separate actor/critic encoders into different optimizer groups
@@ -348,7 +364,7 @@ class EmbodiedSACFSDPPolicy(EmbodiedFSDPActor):
         use_crossq = self.cfg.algorithm.get("q_head_type", "default") == "crossq"
         bootstrap_type = self.cfg.algorithm.get("bootstrap_type", "standard")
         agg_q = self.cfg.algorithm.get("agg_q", "min")
-        use_dsrl = self.cfg.actor.model.get("openpi", {}).get("use_dsrl", False)
+        use_dsrl = self.use_dsrl
         if use_dsrl:
             num_action_chunks = self.cfg.actor.model.get("num_action_chunks", 1)
             discount = self.cfg.algorithm.gamma**num_action_chunks

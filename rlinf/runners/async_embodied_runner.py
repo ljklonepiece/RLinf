@@ -133,6 +133,9 @@ class AsyncEmbodiedRunner(EmbodiedRunner):
         self._pending_rollout_weight_sync = (rollout_handle, actor_handle)
 
     def run(self):
+        # Dry run (pre-submit gate): build everything, do ONE successful rollout+update,
+        # skip val/eval/checkpoint, then tear down cleanly. See EmbodiedRunner.run.
+        dry_run = bool(self.cfg.runner.get("dry_run", False))
         start_step = self.global_step
         start_time = time.time()
         self.update_rollout_weights(no_wait=self.sync_weight_no_wait)
@@ -187,23 +190,24 @@ class AsyncEmbodiedRunner(EmbodiedRunner):
                         ).items()
                     }
 
-                    run_val, save_model, _ = check_progress(
-                        self.global_step,
-                        self.max_steps,
-                        self.cfg.runner.val_check_interval,
-                        self.cfg.runner.save_interval,
-                        1.0,
-                        run_time_exceeded=False,
-                    )
-                    if save_model:
-                        self._save_checkpoint()
                     eval_metrics = {}
-                    if run_val:
-                        with self.timer("eval"):
-                            eval_metrics = self.evaluate()
-                            eval_metrics = {
-                                f"eval/{k}": v for k, v in eval_metrics.items()
-                            }
+                    if not dry_run:
+                        run_val, save_model, _ = check_progress(
+                            self.global_step,
+                            self.max_steps,
+                            self.cfg.runner.val_check_interval,
+                            self.cfg.runner.save_interval,
+                            1.0,
+                            run_time_exceeded=False,
+                        )
+                        if save_model:
+                            self._save_checkpoint()
+                        if run_val:
+                            with self.timer("eval"):
+                                eval_metrics = self.evaluate()
+                                eval_metrics = {
+                                    f"eval/{k}": v for k, v in eval_metrics.items()
+                                }
 
             if skip_step:
                 self.timer.consume_durations()
@@ -283,6 +287,10 @@ class AsyncEmbodiedRunner(EmbodiedRunner):
             if profiled_step is not None:
                 self._close_profiling_window(profiled_step)
 
+            if dry_run:
+                # one successful step completed (skip_step path `continue`s earlier)
+                break
+
         self.env.stop().wait()
         self.rollout.stop().wait()
         self.actor.stop().wait()
@@ -292,3 +300,8 @@ class AsyncEmbodiedRunner(EmbodiedRunner):
         env_handle.wait()
         rollout_handle.wait()
         actor_handle.wait()
+        if dry_run:
+            self.logger.info(
+                "DRY RUN OK: built workers + env + model, ran 1 rollout and 1 actor "
+                "update, skipped val/eval/checkpoint."
+            )

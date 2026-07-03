@@ -575,12 +575,18 @@ class FlowMatchingActionHeadForRLActionPrediction(Gr00tN1d7ActionHead):
         action_input: BatchFeature,
         mode: Literal["train", "eval"] = "train",
         compute_values=True,
+        noise: Optional[torch.Tensor] = None,
     ) -> BatchFeature:
         """Sample an action chunk via stochastic denoising (rollout path).
 
         Returns the predicted action together with the full denoising ``chains``,
         per-step log-probabilities, value estimate and the sampled denoising
         indices, which the actor later replays in :meth:`forward`.
+
+        ``noise`` is the DSRL hook: when given, it is used as the initial denoising
+        latent ``x_t`` instead of fresh Gaussian noise, so a SAC agent can *steer* the
+        frozen flow policy by choosing the noise. It must have shape
+        ``(batch, action_horizon, model_action_dim)`` (the diffusion latent shape).
         """
         if hasattr(backbone_output, "backbone_features"):
             backbone_output = self._process_backbone_output(backbone_output)
@@ -595,11 +601,27 @@ class FlowMatchingActionHeadForRLActionPrediction(Gr00tN1d7ActionHead):
         state_features = self._encode_state_features(action_input, embodiment_id)
         batch_size = vl_embs.shape[0]
         device = vl_embs.device
-        x_t = torch.randn(
-            size=(batch_size, self.action_horizon, self.model_action_dim),
-            dtype=vl_embs.dtype,
-            device=device,
+        expected_noise_shape = (
+            batch_size,
+            self.action_horizon,
+            self.model_action_dim,
         )
+        if noise is None:
+            x_t = torch.randn(
+                size=expected_noise_shape,
+                dtype=vl_embs.dtype,
+                device=device,
+            )
+        else:
+            # DSRL: the SAC agent supplies the initial latent. Validate the shape so a
+            # mismatched noise dim (e.g. dsrl_action_noise_dim != model_action_dim) fails
+            # loudly here rather than corrupting the denoising silently.
+            if tuple(noise.shape) != expected_noise_shape:
+                raise ValueError(
+                    f"DSRL noise shape {tuple(noise.shape)} != expected "
+                    f"{expected_noise_shape} (batch, action_horizon, model_action_dim)."
+                )
+            x_t = noise.to(device=device, dtype=vl_embs.dtype)
 
         chains = [x_t]
         log_probs = []
@@ -653,7 +675,10 @@ class FlowMatchingActionHeadForRLActionPrediction(Gr00tN1d7ActionHead):
         log_probs = torch.stack(log_probs, dim=1)[
             :, :, : self.action_chunk, : self.env_action_dim
         ]
-        if compute_values:
+        # DSRL (add_value_head=False) has no flow value head -- its SAC critic supplies the
+        # value -- so only call get_value when the head actually exists; otherwise the
+        # rollout's prev_values are zeros (unused by the SAC actor).
+        if compute_values and hasattr(self, "value_head"):
             values = self.get_value(vl_embs, state_features)
             values = values[:, None]
         else:
@@ -835,6 +860,11 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         self.action_head.env_action_dim = self.action_dim
         self.action_head.valid_action_dim = self.valid_action_dim
 
+        # DSRL (Diffusion Steering via RL): optional lightweight SAC actor/critic that
+        # steers the frozen flow policy by choosing its initial denoising noise.
+        self.rl_head_config = rl_head_config
+        self._init_dsrl_components(rl_head_config)
+
         self._no_split_modules = self.__class__._no_split_modules
         if hasattr(self, "config"):
             self.config.no_split_modules = self._no_split_modules
@@ -842,6 +872,94 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         logger.info(
             "Forced FSDP _no_split_modules into config: %s",
             self.config.no_split_modules,
+        )
+
+    @property
+    def use_dsrl(self) -> bool:
+        """Whether DSRL (diffusion-steering SAC) is enabled for this model."""
+        return bool(self.rl_head_config.get("use_dsrl", False))
+
+    def _init_dsrl_components(self, rl_head_config: dict[str, Any]) -> None:
+        """Build the DSRL actor/critic heads that steer the frozen flow policy.
+
+        DSRL keeps the GR00T backbone + flow action head frozen and learns a small SAC
+        agent whose action is the *initial denoising noise* fed to the flow policy
+        (``get_rl_action(noise=...)``). Mirrors the openpi DSRL design and reuses the
+        same shared modules so the (model-agnostic) SAC worker drives both identically.
+
+        The SAC noise dimension must equal the diffusion latent dim
+        (``action_head.model_action_dim``, == 35 for the G1 joint action), since the noise
+        IS the initial ``x_t``. We default it to that and assert any explicit override.
+        """
+        if not rl_head_config.get("use_dsrl", False):
+            return
+
+        from rlinf.models.embodiment.modules.compact_encoders import (
+            CompactMultiQHead,
+            CompactStateEncoder,
+            LightweightImageEncoder64,
+        )
+        from rlinf.models.embodiment.modules.gaussian_policy import GaussianPolicy
+
+        model_action_dim = int(self.action_head.model_action_dim)
+        noise_dim = int(rl_head_config.get("dsrl_action_noise_dim", model_action_dim))
+        if noise_dim != model_action_dim:
+            raise ValueError(
+                f"dsrl_action_noise_dim ({noise_dim}) must equal the diffusion latent dim "
+                f"action_head.model_action_dim ({model_action_dim}); the SAC noise IS the "
+                "initial x_t of the flow policy."
+            )
+        state_dim = int(rl_head_config.get("dsrl_state_dim", self.action_dim))
+        num_q_heads = int(rl_head_config.get("dsrl_num_q_heads", 10))
+        image_latent_dim = int(rl_head_config.get("dsrl_image_latent_dim", 64))
+        state_latent_dim = int(rl_head_config.get("dsrl_state_latent_dim", 64))
+        hidden_dims = tuple(rl_head_config.get("dsrl_hidden_dims", (128, 128, 128)))
+        action_horizon = int(self.action_head.action_horizon)
+
+        # Hardcode bf16 (matches the backbone dtype loaded from the checkpoint after
+        # __init__): at build time backbone params are still fp32, so deriving dtype from
+        # them would give the wrong (fp32) dtype and break FSDP's single-dtype FlatParameter.
+        dsrl_dtype = torch.bfloat16
+        actor_input_dim = state_latent_dim + image_latent_dim
+
+        self.dsrl_action_noise_dim = noise_dim
+        self.dsrl_agg_q = str(rl_head_config.get("dsrl_agg_q", "mean"))
+
+        self.dsrl_action_noise_net = GaussianPolicy(
+            input_dim=actor_input_dim,
+            output_dim=noise_dim,
+            hidden_dims=hidden_dims,
+            low=None,
+            high=None,
+            action_horizon=action_horizon,
+        ).to(dtype=dsrl_dtype)
+
+        self.actor_image_encoder = LightweightImageEncoder64(
+            num_images=1, latent_dim=image_latent_dim, image_size=64
+        ).to(dtype=dsrl_dtype)
+        self.actor_state_encoder = CompactStateEncoder(
+            state_dim=state_dim, hidden_dim=state_latent_dim
+        ).to(dtype=dsrl_dtype)
+        self.critic_image_encoder = LightweightImageEncoder64(
+            num_images=1, latent_dim=image_latent_dim, image_size=64
+        ).to(dtype=dsrl_dtype)
+        self.critic_state_encoder = CompactStateEncoder(
+            state_dim=state_dim, hidden_dim=state_latent_dim
+        ).to(dtype=dsrl_dtype)
+        self.q_head = CompactMultiQHead(
+            state_dim=state_latent_dim,
+            image_dim=image_latent_dim,
+            action_dim=noise_dim,
+            hidden_dims=hidden_dims,
+            num_q_heads=num_q_heads,
+            output_dim=1,
+        ).to(dtype=dsrl_dtype)
+
+        logger.info(
+            "[DSRL] initialized: noise_dim=%d state_dim=%d num_q_heads=%d "
+            "image_latent=%d state_latent=%d horizon=%d",
+            noise_dim, state_dim, num_q_heads, image_latent_dim,
+            state_latent_dim, action_horizon,
         )
 
     def _load_modality_processor(
@@ -917,6 +1035,10 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
     def forward(self, forward_type=ForwardType.DEFAULT, **kwargs):
         if forward_type == ForwardType.DEFAULT:
             return self.default_forward(**kwargs)
+        elif forward_type == ForwardType.SAC:
+            return self.sac_forward(**kwargs)
+        elif forward_type == ForwardType.SAC_Q:
+            return self.sac_q_forward(**kwargs)
         else:
             raise NotImplementedError
 
@@ -981,6 +1103,144 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
             "entropy": None,
         }
 
+    # ===== DSRL: SAC actor/critic over the flow policy's initial noise =====
+
+    @staticmethod
+    def _dsrl_unpack_obs(obs: Optional[dict], kwargs: dict) -> dict:
+        """Accept either the env obs ({main_images,states}) or internal ({images,states})."""
+        if obs is None:
+            obs = kwargs.get("obs", {})
+        if "images" in obs:
+            return obs
+        if "main_images" in obs:
+            return {"images": [obs["main_images"]], "states": obs["states"]}
+        raise ValueError(
+            f"Invalid DSRL obs keys {list(obs)}; expected 'images' or 'main_images'."
+        )
+
+    def _preprocess_dsrl_images(self, images, train: bool = False) -> torch.Tensor:
+        """Resize the single ego image to 64x64 in [-1,1], shaped [B, 1, C, 64, 64].
+
+        Accepts the first camera as a list element or a bare tensor, in NHWC (env) or
+        NCHW (processed) layout, uint8 [0,255] or float in [0,1]/[-1,1].
+        """
+        img = images[0] if isinstance(images, list) else images
+        if img.shape[-1] == 3:  # NHWC -> NCHW
+            img = img.permute(0, 3, 1, 2)
+        if img.dtype == torch.uint8:
+            img = img.float() / 255.0
+        else:
+            img = img.float()
+            if img.min() < 0:  # assume [-1, 1] -> [0, 1]
+                img = (img + 1.0) / 2.0
+        img = img.clamp(0.0, 1.0)
+        img = torch.nn.functional.interpolate(
+            img, size=(64, 64), mode="bilinear", align_corners=False
+        )
+        img = img * 2.0 - 1.0  # [0,1] -> [-1,1]
+        return img.unsqueeze(1)  # [B, 1, C, 64, 64]
+
+    @staticmethod
+    def _preprocess_dsrl_states(states: torch.Tensor) -> torch.Tensor:
+        """Flatten states to [B, state_dim] (encoders cast dtype internally)."""
+        if states.dim() > 2:
+            states = states.reshape(states.shape[0], -1)
+        return states
+
+    def sac_forward(
+        self, obs=None, data=None, train=False, return_dist_params=False, **kwargs
+    ):
+        """SAC actor: encode obs and sample the steering noise.
+
+        Returns ``(action_noise, logprobs, dist_params)`` where ``action_noise`` is
+        ``[B, action_horizon, dsrl_action_noise_dim]`` (the same noise vector repeated
+        over the horizon, matching the flow latent). ``mode='eval'`` is deterministic.
+        """
+        if not self.use_dsrl:
+            raise ValueError("sac_forward called but use_dsrl=False")
+        obs = self._dsrl_unpack_obs(obs if obs is not None else data, kwargs)
+
+        device = next(self.actor_image_encoder.parameters()).device
+        dtype = next(self.actor_image_encoder.parameters()).dtype
+        images = self._preprocess_dsrl_images(obs["images"], train=train).to(
+            device=device, dtype=dtype
+        )
+        states = self._preprocess_dsrl_states(obs["states"]).to(
+            device=device, dtype=dtype
+        )
+
+        image_features = self.actor_image_encoder(images)
+        state_features = self.actor_state_encoder(states)
+        features = torch.cat([state_features, image_features], dim=-1)
+
+        deterministic = kwargs.get("mode", "train") == "eval"
+        action_noise, logprobs = self.dsrl_action_noise_net.sample(
+            features, deterministic=deterministic
+        )
+
+        dist_params = None
+        if return_dist_params:
+            dist = self.dsrl_action_noise_net.forward(features)
+            dist_params = (dist.mean, dist.stddev)
+        return action_noise, logprobs, dist_params
+
+    def sac_q_forward(
+        self,
+        obs=None,
+        data=None,
+        actions=None,
+        detach_encoder=False,
+        train=False,
+        **kwargs,
+    ):
+        """SAC critic: Q-values ``[B, num_q_heads]`` for the given steering noise."""
+        if not self.use_dsrl:
+            raise ValueError("sac_q_forward called but use_dsrl=False")
+        obs = self._dsrl_unpack_obs(obs if obs is not None else data, kwargs)
+        if actions is None:
+            actions = kwargs.get("actions")
+
+        device = next(self.critic_image_encoder.parameters()).device
+        dtype = next(self.critic_image_encoder.parameters()).dtype
+        images = self._preprocess_dsrl_images(obs["images"], train=train).to(
+            device=device, dtype=dtype
+        )
+        states = self._preprocess_dsrl_states(obs["states"]).to(
+            device=device, dtype=dtype
+        )
+        actions = actions.to(device=device, dtype=dtype)
+
+        image_features = self.critic_image_encoder(images)
+        state_features = self.critic_state_encoder(states)
+        if detach_encoder:
+            image_features = image_features.detach()
+            state_features = state_features.detach()
+
+        if actions.dim() == 3:  # [B, horizon, dim] -> [B, dim] (noise repeated over horizon)
+            actions = actions[:, 0, :]
+        return self.q_head(state_features, image_features, actions)
+
+    def freeze_vlm(self):
+        """Freeze the GR00T backbone + flow action head for DSRL.
+
+        In DSRL only the lightweight SAC actor/critic (``dsrl_action_noise_net``,
+        ``*_image_encoder``, ``*_state_encoder``, ``q_head``) are trained; the entire
+        base policy is frozen and used purely to map steering noise -> action. No-op when
+        DSRL is disabled (the PPO/GRPO actor trains the base directly).
+        """
+        if not self.use_dsrl:
+            return
+        frozen = 0
+        self.backbone.eval()
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+            frozen += 1
+        self.action_head.eval()
+        for p in self.action_head.parameters():
+            p.requires_grad = False
+            frozen += 1
+        logger.info("[DSRL] freeze_vlm: froze %d base param tensors (backbone+action_head)", frozen)
+
     @torch.no_grad()
     def predict_action_batch(
         self,
@@ -988,10 +1248,25 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         mode: Literal["train", "eval"] = "train",
         **kwargs,
     ):
-        """Rollout entry point: produce env-ready actions and RL bookkeeping."""
+        """Rollout entry point: produce env-ready actions and RL bookkeeping.
+
+        DSRL rollout: the SAC actor picks the steering noise (stochastic in ``train``
+        mode), and the frozen flow policy denoises it *deterministically* into the env
+        action. The noise (not the diffusion chain) is what SAC trains on, so it is
+        stored as ``forward_inputs['action']`` with its log-prob as ``prev_logprobs``.
+        """
         del kwargs
+        dsrl_noise = None
+        dsrl_logprob = None
+        if self.use_dsrl:
+            dsrl_noise, dsrl_logprob, _ = self.sac_forward(
+                env_obs, train=False, mode=mode
+            )
+
         observations, obs_copy, is_batch = self._prepare_rollout_observation(env_obs)
-        normalized_action, result = self._predict_normalized_action(obs_copy, mode)
+        normalized_action, result = self._predict_normalized_action(
+            obs_copy, mode, noise=dsrl_noise
+        )
         unnormalized_action = self._get_unnormalized_action(
             normalized_action,
             state=observations,
@@ -1004,7 +1279,14 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
             unnormalized_action,
             chunk_size=self.output_action_chunks,
         )
-        raw_action = self._apply_exploration_noise(raw_action, mode)
+        if self.use_dsrl:
+            # The steering noise IS the exploration; don't add extra action-space noise.
+            # SAC trains on the noise, so surface it (and its log-prob) for the buffer.
+            result["prev_logprobs"] = dsrl_logprob
+            if isinstance(result.get("forward_inputs"), dict):
+                result["forward_inputs"]["action"] = dsrl_noise
+        else:
+            raw_action = self._apply_exploration_noise(raw_action, mode)
         return raw_action, result
 
     @staticmethod
@@ -1054,8 +1336,14 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         self,
         obs_copy: dict[str, Any],
         mode: Literal["train", "eval"],
+        noise: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
-        """Run the policy and return normalized actions plus RL bookkeeping."""
+        """Run the policy and return normalized actions plus RL bookkeeping.
+
+        ``noise`` (DSRL): when provided, the flow policy denoises this SAC-supplied latent
+        *deterministically* (eval-mode denoising) while still emitting RL bookkeeping, so
+        the action is a pure function of the steering noise.
+        """
         normalized_input = self.apply_transforms(obs_copy)
         normalized_input = self._cast_float_tensors_to_compute_dtype(
             normalized_input,
@@ -1066,7 +1354,14 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
             getattr(self, "padding_value", 0),
         )
 
-        if mode == "eval":
+        if noise is not None:
+            # DSRL: deterministic denoise from the injected noise, with bookkeeping.
+            normalized_action, result = self._get_rl_action(
+                normalized_input,
+                mode="eval",
+                noise=noise,
+            )
+        elif mode == "eval":
             normalized_action = self._get_action_from_normalized_input(normalized_input)
             result = {
                 "prev_logprobs": None,
@@ -1135,14 +1430,18 @@ class GR00T_N1_7_ForRLActionPrediction(Gr00tN1d7, BasePolicy):
         self,
         normalized_input: dict[str, Any],
         mode: Literal["train", "eval"] = "train",
+        noise: Optional[torch.Tensor] = None,
     ):
-        """Sample an action and assemble the ``forward_inputs`` cached for the actor."""
+        """Sample an action and assemble the ``forward_inputs`` cached for the actor.
+
+        ``noise`` (DSRL) is forwarded to the flow head as the initial denoising latent.
+        """
         normalized_input = _normalize_gr00t_forward_inputs(normalized_input)
 
         backbone_inputs, action_inputs = self.prepare_input(normalized_input)
         backbone_outputs = self.backbone(backbone_inputs)
         action_head_outputs, rlinf_outputs = self.action_head.get_rl_action(
-            backbone_outputs, action_inputs, mode=mode
+            backbone_outputs, action_inputs, mode=mode, noise=noise
         )
         actions = rlinf_outputs["actions"]
         if hasattr(self, "validate_data"):

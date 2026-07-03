@@ -20,6 +20,7 @@ class SupportedEnvType(Enum):
     LIBERO = "libero"
     ROBOTWIN = "robotwin"
     ISAACLAB = "isaaclab"
+    ISAACLAB_ARENA = "isaaclab_arena"
     METAWORLD = "metaworld"
     BEHAVIOR = "behavior"
     CALVIN = "calvin"
@@ -82,6 +83,21 @@ def get_env_cls(env_type: str, env_cfg=None):
             f"Available tasks: {list(REGISTER_ISAACLAB_ENVS.keys())}"
         )
         return REGISTER_ISAACLAB_ENVS[task_id]
+    elif env_type == SupportedEnvType.ISAACLAB_ARENA:
+        from rlinf.envs.isaaclab_arena import REGISTER_ISAACLAB_ARENA_ENVS
+
+        if env_cfg is None:
+            raise ValueError(
+                "env_cfg is required for isaaclab_arena environment type. "
+                "Please provide env_cfg.init_params.id to select the task."
+            )
+
+        task_id = env_cfg.init_params.id
+        assert task_id in REGISTER_ISAACLAB_ARENA_ENVS, (
+            f"Task type {task_id} has not been registered! "
+            f"Available tasks: {list(REGISTER_ISAACLAB_ARENA_ENVS.keys())}"
+        )
+        return REGISTER_ISAACLAB_ARENA_ENVS[task_id]
     elif env_type == SupportedEnvType.METAWORLD:
         from rlinf.envs.metaworld.metaworld_env import MetaWorldEnv
 

@@ -58,6 +58,8 @@ def get_model(cfg: DictConfig, torch_dtype=torch.bfloat16):
         "robocasa_panda_omron": EmbodimentTag.ROBOCASA_PANDA_OMRON,
         "gr1": EmbodimentTag.GR1,
         "behavior_r1_pro": EmbodimentTag.BEHAVIOR_R1_PRO,
+        "isaaclab_arena_g1": EmbodimentTag.ISAACLAB_ARENA_G1,
+        "isaaclab_arena_g1_eef": EmbodimentTag.ISAACLAB_ARENA_G1_EEF,
         "new_embodiment": EmbodimentTag.NEW_EMBODIMENT,
         "so101": EmbodimentTag.NEW_EMBODIMENT,
         "so100": EmbodimentTag.NEW_EMBODIMENT,
@@ -99,5 +101,10 @@ def get_model(cfg: DictConfig, torch_dtype=torch.bfloat16):
 
     if cfg.rl_head_config.disable_dropout:
         replace_dropout_with_identity(model)
+
+    # DSRL: freeze the GR00T backbone + flow head so only the SAC actor/critic train.
+    # No-op when use_dsrl is False (PPO/GRPO trains the base directly).
+    if cfg.rl_head_config.get("use_dsrl", False) and hasattr(model, "freeze_vlm"):
+        model.freeze_vlm()
 
     return model
