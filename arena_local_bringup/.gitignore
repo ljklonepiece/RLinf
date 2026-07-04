@@ -1,0 +1,16 @@
+# Generated artifacts / heavy outputs (not source) -- keep the repo light.
+*.log
+__pycache__/
+.sync_tmp/
+tunevis_videos/
+eval_videos/
+eval_frames/
+videos/
+render_out/
+eval_test_out/
+newds_inspect/
+arena_venv_freeze_before_model.txt
+
+# Secrets -- never commit.
+.wandb.env
+*.env

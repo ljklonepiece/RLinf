@@ -1,0 +1,36 @@
+# Self-contained IsaacLab-Arena + GR00T N1.7 + RLinf eval image.
+#
+# Goal: run the drill_lift BC-ckpt eval on the OSMO cluster with ZERO on-node build
+# (no internal gitlab, no `uv sync`, no dependency on anyone else's checkout/venv).
+#
+# Strategy: bake the exact, already-working local stack. The venv uses PEP 660
+# editable installs whose finders hold ABSOLUTE paths to the source trees, so the
+# repos are copied to the SAME /home/juekunl/Work/... paths they were built at.
+# Checkpoints + Cosmos backbone are NOT baked; they are read from the mounted
+# Lustre (/mnt/amlfs-07/...) at run time.
+FROM nvcr.io/nvidian/gear-n2-eval:py312-2026.05.07
+
+# Arena repo (incl. prebuilt .venv 26G, assets 7.9G, submodules/IsaacLab source),
+# standalone Isaac-GR00T (N1.7), my RLinf (in-process arena env + gr00t_n1d7), driver.
+COPY IsaacLab-Arena /home/juekunl/Work/IsaacLab-Arena
+COPY Isaac-GR00T   /home/juekunl/Work/Isaac-GR00T
+COPY RLinf         /home/juekunl/Work/RLinf
+# arena_local_bringup now lives inside RLinf (RLinf/arena_local_bringup); COPY it to the flat path
+# the node/eval scripts expect. Build context is still ~/Work. NOTE: add a .dockerignore that excludes
+# RLinf/arena_local_bringup/{tunevis_videos,eval_videos,eval_frames,videos,...} so `COPY RLinf` above
+# does not sweep the heavy artifact dirs into the image.
+COPY RLinf/arena_local_bringup/eval_bc_ckpt.py /home/juekunl/Work/arena_local_bringup/eval_bc_ckpt.py
+
+ENV ISAACLAB_ARENA_PATH=/home/juekunl/Work/IsaacLab-Arena \
+    ACCEPT_EULA=Y \
+    OMNI_KIT_ALLOW_ROOT=1 \
+    OMNI_KIT_ACCEPT_EULA=YES \
+    PYTHONUNBUFFERED=1 \
+    MUJOCO_GL=egl
+
+WORKDIR /home/juekunl/Work/IsaacLab-Arena
+
+# Run pattern (driven by the OSMO workflow command):
+#   cd /home/juekunl/Work/IsaacLab-Arena && source .venv/bin/activate && \
+#   CUDA_VISIBLE_DEVICES=<g> python /home/juekunl/Work/arena_local_bringup/eval_bc_ckpt.py \
+#     --model_path /mnt/amlfs-07/shared/juekunl/ckpts/.../checkpoint-<N> --n_episodes 100 --seed 42

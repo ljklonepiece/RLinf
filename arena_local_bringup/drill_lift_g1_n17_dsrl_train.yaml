@@ -1,0 +1,293 @@
+# DSRL (Diffusion Steering via RL, embodied_sac) on GR00T N1.7 + in-process IsaacLab-Arena
+# G1 drill_lift. PLUMBING / sign-of-life on the PUBLIC nvidia/GR00T-N1.7-3B base.
+#
+# Same plumbing caveat as drill_lift_g1_n17_plumbing.yaml: the public base ships only the
+# real_g1_relative_eef_relative_joints G1 embodiment, so obs/embodiment = isaaclab_arena_g1_eef
+# (best-effort eef mapping; garbage policy). This config proves the DSRL chain end-to-end
+# (frozen GR00T base steered by a SAC agent on the noise). For a REAL run: BC-finetuned ckpt
+# + obs_converter_type/embodiment_tag = isaaclab_arena_g1.
+#
+# train.py routes loss_type=="embodied_sac" -> EmbodiedSACFSDPPolicy actor.
+#
+# Run:
+#   RLINF_EXT_MODULE=isaaclab_contrib.rl.rlinf.extension \
+#   NCCL_SHM_DISABLE=1 NCCL_P2P_DISABLE=1 \
+#   python <IsaacLab>/scripts/reinforcement_learning/rlinf/train.py \
+#     --config_path /home/juekunl/Work/arena_local_bringup \
+#     --config_name drill_lift_g1_n17_dsrl_plumbing \
+#     --model_path /home/juekunl/Work/models/GR00T-N1.7-3B
+
+defaults:
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: all
+
+weight_syncer:
+  type: patch
+  patch:
+    snapshot_device: cpu
+    transport_device: cpu
+    delta_encoding: True
+    compression: none
+    init_sync:
+      enabled: True
+      prefixes: null
+      bucket_size: 134217728
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "/home/juekunl/Work/arena_local_bringup/m5_dsrl_train_results"
+    project_name: rlinf
+    experiment_name: "drill_lift_g1_n17_dsrl_train"
+    logger_backends: ["tensorboard"]
+  # Local multi-step DSRL sign-of-life: real (non-dry) training for a modest number of
+  # rollout+update epochs to prove the SAC loop is stable + learning (finite/evolving q/actor/
+  # alpha losses, no OOM/leak). Policy stays garbage (public base + eef hack); this de-risks
+  # the training MECHANICS before OSMO, not task success.
+  max_epochs: 30
+  max_steps: -1
+  only_eval: False
+  val_check_interval: -1
+  save_interval: -1
+  seq_length: 4096
+  max_prompt_length: 30
+  resume_dir: null
+  dry_run: False
+
+algorithm:
+  normalize_advantages: False
+  kl_penalty: kl
+  group_size: 1
+  reward_coef: 1.0
+
+  reward_type: chunk_level
+  logprob_type: chunk_level
+  entropy_type: token_level
+
+  # DSRL / SAC. Moderate SAC gradient steps per rollout for the local sign-of-life (real
+  # training uses ~200); enough to see q/actor/alpha losses evolve without being slow on 1 GPU.
+  update_epoch: 10
+  adv_type: embodied_sac
+  loss_type: embodied_sac
+  loss_agg_func: "token-mean"
+
+  agg_q: mean
+  actor_agg_q: mean
+  backup_entropy: False
+  critic_subsample_size: 0
+  critic_actor_ratio: 1
+
+  bootstrap_type: standard
+  gamma: 0.999
+  tau: 0.005
+
+  entropy_tuning:
+    alpha_type: softplus
+    initial_alpha: 1.0
+    # DSRL steers the NOISE; for the public N1.7 base the diffusion latent (noise) dim is 132
+    # (model_action_dim). target_entropy ~ -noise_dim/2. Tune for real runs.
+    target_entropy: -66
+    optim:
+      lr: 3.0e-4
+      lr_scheduler: torch_constant
+      clip_grad: 10.0
+
+  replay_buffer:
+    enable_cache: True
+    cache_size: 15000
+    sample_window_size: 15000
+    min_buffer_size: 10
+    auto_save: False
+
+  target_update_freq: 1
+  target_update_type: all
+  train_actor_steps: 1
+
+  filter_rewards: False
+  rewards_lower_bound: 0.1
+  rewards_upper_bound: 0.9
+
+env:
+  group_name: "EnvGroup"
+  channel:
+    name: "env_buffer_list"
+    queue_name: "obs_buffer"
+    queue_size: 0
+  enable_offload: False
+  train:
+    env_type: isaaclab_arena
+    total_num_envs: 2
+    auto_reset: False
+    ignore_terminations: False
+    use_rel_reward: False
+    seed: 0
+    group_size: 1
+    reward_coef: 1.0
+    rollout_epoch: 1
+    use_fixed_reset_state_ids: False
+    max_steps_per_rollout_epoch: 8
+    max_episode_steps: 128
+    video_cfg:
+      save_video: False
+      info_on_video: False
+      fps: 20
+      video_base_dir: ${runner.logger.log_path}/video/train
+    init_params:
+      id: "LMDrillLiftRlD1"
+      num_envs: null
+      device: "cuda:0"
+      max_episode_steps: ${env.train.max_episode_steps}
+      task_description: "Lift the drill from the table."
+      reward_mode: sparse
+      embodiment: "g1_gr00t"
+      lift_height: 0.16
+      state_key: "robot_joint_pos"
+      camera_key: "robot_head_cam_rgb"
+  eval:
+    env_type: isaaclab_arena
+    total_num_envs: 4
+    is_eval: True
+    auto_reset: False
+    ignore_terminations: True
+    use_rel_reward: False
+    seed: 0
+    group_size: 1
+    reward_coef: 1.0
+    rollout_epoch: 1
+    use_fixed_reset_state_ids: False
+    max_steps_per_rollout_epoch: 8
+    max_episode_steps: 128
+    video_cfg:
+      save_video: False
+      info_on_video: False
+      fps: 20
+      video_base_dir: ${runner.logger.log_path}/video/eval
+    init_params:
+      id: "LMDrillLiftRlD1"
+      num_envs: null
+      device: "cuda:0"
+      max_episode_steps: ${env.eval.max_episode_steps}
+      task_description: "Lift the drill from the table."
+      reward_mode: sparse
+      embodiment: "g1_gr00t"
+      lift_height: 0.16
+      state_key: "robot_joint_pos"
+      camera_key: "robot_head_cam_rgb"
+
+rollout:
+  group_name: "RolloutGroup"
+  channel:
+    name: ${env.channel.name}
+    queue_name: "action_buffer"
+    queue_size: 0
+  mode: "colocate"
+  backend: "huggingface"
+  recompute_logprobs: False
+  enable_offload: True
+  pipeline_stage_num: 1
+  collect_transitions: True
+  collect_prev_infos: False
+  model:
+    model_path: /home/juekunl/Work/models/GR00T-N1.7-3B
+    backbone_model_path: /home/juekunl/Work/models/Cosmos-Reason2-2B
+    precision: ${actor.model.precision}
+    obs_converter_type: isaaclab_arena_g1_eef
+    embodiment_tag: isaaclab_arena_g1_eef
+
+actor:
+  group_name: "ActorGroup"
+  channel:
+    name: ${env.channel.name}
+    queue_name: "replay_buffer"
+    queue_size: 0
+  training_backend: "fsdp"
+  num_gpus: 1
+  micro_batch_size: 1
+  global_batch_size: 2
+  seed: 1234
+  enable_offload: False   # offload needs CUDA-IPC (pidfd_getfd), blocked by this container's seccomp
+  model:
+    model_type: "gr00t_n1d7"
+    model_path: ${rollout.model.model_path}
+    backbone_model_path: ${rollout.model.backbone_model_path}
+    precision: "bf16"
+    trust_remote_code: True
+    is_lora: false
+    action_dim: 35
+    num_action_chunks: 8
+    env_execute_chunks: 1
+    gradient_checkpointing: true
+    denoising_steps: 4
+    obs_converter_type: ${rollout.model.obs_converter_type}
+    embodiment_tag: ${rollout.model.embodiment_tag}
+    # DSRL trains its own SAC critic, not the flow value head.
+    add_value_head: False
+    no_split_modules:
+      - "Qwen3VLTextDecoderLayer"
+      - "Qwen3VLVisionBlock"
+      - "BasicTransformerBlock"
+      - "FlowMatchingActionHeadForRLActionPrediction"
+      - "TimestepEncoder"
+      - "TimestepEmbedding"
+    rl_head_config:
+      joint_logprob: False
+      noise_method: "flow_sde"
+      ignore_last: False
+      safe_get_logprob: False
+      noise_anneal: False
+      noise_params: [0.7, 0.3, 400]
+      noise_level: 0.3
+      add_value_head: ${actor.model.add_value_head}
+      chunk_critic_input: False
+      detach_critic_input: True
+      disable_dropout: True
+      use_vlm_value: False
+      value_vlm_mode: "mean_token"
+      padding_value: 570
+      # DSRL: SAC steers the frozen flow policy's noise.
+      use_dsrl: True
+      dsrl_state_dim: 43
+      dsrl_num_q_heads: 10
+      dsrl_agg_q: mean
+      dsrl_image_latent_dim: 64
+      dsrl_state_latent_dim: 64
+      dsrl_hidden_dims: [128, 128, 128]
+  optim:
+    lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.96
+    adam_eps: 1.0e-08
+    clip_grad: 3.5
+  critic_optim:
+    lr: 3.0e-4
+    clip_grad: 10.0
+    lr_scheduler: torch_constant
+  fsdp_config:
+    strategy: "fsdp"
+    transformer_layer_cls_to_wrap:
+      - "Qwen3VLTextDecoderLayer"
+      - "Qwen3VLVisionBlock"
+      - "BasicTransformerBlock"
+      - "FlowMatchingActionHeadForRLActionPrediction"
+      - "TimestepEncoder"
+      - "TimestepEmbedding"
+    use_orig_params: true
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: False
+
+critic:
+  use_critic_model: False

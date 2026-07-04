@@ -1,0 +1,87 @@
+# OSMO workflow: parallel BC-ckpt eval sweep for drill_lift on a single 8-GPU node.
+#
+# Uses the self-contained image (arena + GR00T N1.7 + RLinf + eval driver baked in),
+# so there is NO on-node build. Checkpoints + Cosmos backbone are read from the
+# auto-mounted team Lustre (/mnt/*lfs*). Each of the 5 BC checkpoints runs on its
+# own GPU in parallel via the in-process RLinf gr00t_n1d7 eval (100 eps, seed 42),
+# identical methodology to the local run.
+#
+# Submit:
+#   osmo workflow submit eval_sweep_osmo.yaml --pool <pool> \
+#     --set-string workflow_name=jk_drill_lift_eval_sweep
+version: 2
+workflow:
+  name: "{{ workflow_name }}"
+  groups:
+  - name: eval
+    tasks:
+    - args:
+      - /tmp/entry.sh
+      command:
+      - bash
+      downloadType: download
+      environment:
+        ACCEPT_EULA: "Y"
+        OMNI_KIT_ACCEPT_EULA: "YES"
+        OMNI_KIT_ALLOW_ROOT: "1"
+        PYTHONUNBUFFERED: "1"
+        MUJOCO_GL: "egl"
+      files:
+      - path: /tmp/entry.sh
+        contents: |-
+          set -uxo pipefail
+          export AMLFS_DIR=$(find /mnt/ -maxdepth 1 -type d -name "*lfs*" | sort | head -n 1)
+          echo "AMLFS_DIR=$AMLFS_DIR"
+          CKPT_ROOT="{{ ckpt_root }}"
+          BACKBONE="$AMLFS_DIR/shared/juekunl/models/nvidia/Cosmos-Reason2-2B"
+          STAMP=$(date +%Y%m%d_%H%M%S)
+          OUT="$AMLFS_DIR/shared/juekunl/eval_sweep_$STAMP"
+          mkdir -p "$OUT"
+          echo "results -> $OUT"
+          nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
+          echo "ckpt dir:"; ls "$CKPT_ROOT" || { echo "CKPT_ROOT missing"; exit 1; }
+
+          cd /home/juekunl/Work/IsaacLab-Arena
+          source .venv/bin/activate
+          export MUJOCO_GL=egl
+          export PYTHONPATH=/home/juekunl/Work/RLinf:${PYTHONPATH:-}
+
+          CKPTS="{{ ckpts }}"
+          i=0
+          for C in $CKPTS; do
+            echo "launch checkpoint-$C on GPU $i -> $OUT/eval_ckpt${C}.log"
+            CUDA_VISIBLE_DEVICES=$i python -u /home/juekunl/Work/arena_local_bringup/eval_bc_ckpt.py \
+              --model_path "$CKPT_ROOT/checkpoint-$C" \
+              --backbone "$BACKBONE" \
+              --n_episodes {{ n_episodes }} --seed {{ seed }} \
+              --video_dir "$OUT/videos/checkpoint-$C/seed{{ seed }}" \
+              > "$OUT/eval_ckpt${C}.log" 2>&1 &
+            i=$((i+1))
+          done
+          wait
+
+          echo "================ SWEEP RESULTS ================" | tee "$OUT/SUMMARY.txt"
+          for C in $CKPTS; do
+            R=$(grep -h "SUCCESS_RATE" "$OUT/eval_ckpt${C}.log" | tail -1)
+            echo "checkpoint-$C: ${R:-NO_RESULT (see eval_ckpt${C}.log)}" | tee -a "$OUT/SUMMARY.txt"
+          done
+          echo "logs + SUMMARY.txt in $OUT" | tee -a "$OUT/SUMMARY.txt"
+      image: nvcr.io/nvidian/juekunl-arena-eval:n1d7-drilllift
+      lead: true
+      name: master
+  resources:
+    default:
+      cpu: 48
+      gpu: 8
+      memory: 700Gi
+      storage: 200Gi
+  timeout:
+    exec_timeout: 6h
+    queue_timeout: 1d
+
+default-values:
+  workflow_name: jk_drill_lift_eval_sweep
+  ckpt_root: /mnt/amlfs-07/shared/juekunl/ckpts/drill_lift_bc_gr00t_n1d7_nojitter/drill_lift_bc_n1d7_nojitter
+  ckpts: "2000 4000 6000 8000 10000"
+  n_episodes: 100
+  seed: 42
