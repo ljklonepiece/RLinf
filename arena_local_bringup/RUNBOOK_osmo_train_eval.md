@@ -201,12 +201,13 @@ branch; it is not on `masoud/g1_factory` or `main`.
 
 ### ⚠ Reproducibility caveats (don't skip)
 
-0. **UPDATE (2026-07-03):** the RLinf Arena integration has since been committed to local branch
-   `jk/isaaclab-arena-gr00t` (`79d52345`, not yet pushed). **Consequence for `sync_rlinf.sh`:** it ships
-   only the *working-tree delta* (`git ls-files -mo`), which is now empty, so it delivers NOTHING; and the
-   node's base clone is upstream GitHub, which does not have `79d52345`. To put the Arena code on a truly
-   fresh node you must either (a) use the baked eval image (its RLinf already contains it — see §10), or
-   (b) push the branch to the fork and `git clone` + `git checkout jk/isaaclab-arena-gr00t` on the node.
+0. **UPDATE (2026-07-04):** the RLinf Arena integration + the vendored `arena_local_bringup` are committed
+   AND **pushed** to fork `git@github.com:ljklonepiece/RLinf.git`, branch `jk/isaaclab-arena-gr00t`
+   (tip `ac48db98`). **Consequence for `sync_rlinf.sh`:** it ships only the *working-tree delta*
+   (`git ls-files -mo`), which is now empty (everything is committed), so it delivers NOTHING. To put the
+   Arena code on a fresh node, either (a) use the baked eval image (its RLinf already contains it — §10),
+   or (b) now that the branch is on the fork: `git clone git@github.com:ljklonepiece/RLinf.git &&
+   git checkout jk/isaaclab-arena-gr00t` on the node (this also brings `arena_local_bringup/`).
 1. **RLinf Arena integration (originally uncommitted)** on top of `f711061e`. The whole env package
    `rlinf/envs/isaaclab_arena/` and configs are *untracked*, plus these are *modified*:
    `rlinf/envs/__init__.py`, `rlinf/envs/action_utils.py`, `rlinf/models/embodiment/gr00t/simulation_io.py`,
