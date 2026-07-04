@@ -1,0 +1,38 @@
+# Build context allowlist for the arena+gr00t eval image.
+# Bake ONLY the four trees the eval needs; drop everything else in ~/Work.
+*
+!IsaacLab-Arena
+!Isaac-GR00T
+!RLinf
+
+# Heavy/unneeded inside the kept trees (later patterns win over the re-includes).
+**/.git
+**/__pycache__
+**/*.pyc
+**/*.pyo
+RLinf/.venv
+RLinf/logs
+RLinf/outputs
+RLinf/wandb
+Isaac-GR00T/.venv
+# arena_local_bringup now lives inside RLinf; drop its heavy artifact dirs so `COPY RLinf` stays light.
+RLinf/arena_local_bringup/eval_videos
+RLinf/arena_local_bringup/tunevis_videos
+RLinf/arena_local_bringup/eval_frames
+RLinf/arena_local_bringup/videos
+RLinf/arena_local_bringup/newds_inspect
+RLinf/arena_local_bringup/render_out
+RLinf/arena_local_bringup/eval_test_out
+RLinf/arena_local_bringup/.sync_tmp
+RLinf/arena_local_bringup/*.log
+
+# isaacsim runtime caches: root-owned + unreadable to the build sender, and
+# regenerated at runtime. Exclude broadly (also avoids races while the local
+# eval is running and writing new cache files).
+**/nv_shadercache
+**/GLCache
+**/ComputeCache
+**/kit/cache
+**/kit/logs
+**/kit/data
+IsaacLab-Arena/.venv/**/*.cache

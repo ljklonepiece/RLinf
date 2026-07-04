@@ -9,7 +9,7 @@ All persistent assets live on Lustre `/mnt/amlfs-07/shared/juekunl/` (mounted on
 
 ---
 
-## 1. Artifacts (in `~/Work/arena_local_bringup/`)
+## 1. Artifacts (in `~/Work/RLinf/arena_local_bringup/`, git-tracked on branch `jk/isaaclab-arena-gr00t`)
 
 | script | runs where | purpose |
 |---|---|---|
@@ -220,8 +220,13 @@ branch; it is not on `masoud/g1_factory` or `main`.
    reproduces exactly the 5 modified files: `examples/finetune.sh`, `gr00t/configs/data/data_config.py`,
    `gr00t/data/dataset/{factory.py,sharded_single_step_dataset.py}`, `gr00t/experiment/launch_finetune.py`).
    So Isaac-GR00T IS reproducible from commit + patch (no manual snapshot needed).
-3. **`~/Work/arena_local_bringup/` is NOT under git** — all the scripts in §1 (and this runbook) are
-   un-versioned scratch. **Back this dir up** (git-init it, or tar → S3) or the pipeline glue is lost.
+3. **RESOLVED (2026-07-04):** `arena_local_bringup/` was moved into `RLinf/arena_local_bringup/` and
+   committed on branch `jk/isaaclab-arena-gr00t` (`8a45bf2c`) — the scripts + this runbook are now
+   version-controlled (heavy artifacts/videos/logs + `.wandb.env` are gitignored). Still LOCAL-only until
+   the branch is pushed (see #1). NOTE: because it now lives inside RLinf, the eval-image build's
+   `COPY RLinf` would sweep the (gitignored but not docker-ignored) video dirs — a `.dockerignore` must
+   exclude `RLinf/arena_local_bringup/{tunevis_videos,eval_videos,eval_frames,videos,newds_inspect}` before
+   the next `docker build` (see §10).
 4. gr00t `jk/offline-rl` is only needed for the `gear` CLI and the internal IQL-baseline reference, not for
    the BC train/eval path itself.
 
@@ -243,7 +248,12 @@ they were built at (`/home/juekunl/Work/{IsaacLab-Arena,Isaac-GR00T,RLinf}` + `e
 `.venv` uses PEP-660 editable installs with absolute finders. Build context is `~/Work` (~32 GB):
 ```bash
 cd /home/juekunl/Work
-docker build -f arena_local_bringup/Dockerfile.arena-eval -t nvcr.io/nvidian/juekunl-arena-eval:n1d7-drilllift .
+# The build context is ~/Work; its .dockerignore allowlists IsaacLab-Arena/Isaac-GR00T/RLinf and must
+# exclude RLinf/arena_local_bringup/{tunevis_videos,eval_videos,eval_frames,videos,newds_inspect} or
+# `COPY RLinf` bloats the image by ~400MB. A reference copy is kept in the repo at
+# RLinf/arena_local_bringup/work.dockerignore -> copy it to ~/Work/.dockerignore before building.
+cp RLinf/arena_local_bringup/work.dockerignore .dockerignore
+docker build -f RLinf/arena_local_bringup/Dockerfile.arena-eval -t nvcr.io/nvidian/juekunl-arena-eval:n1d7-drilllift .
 docker push nvcr.io/nvidian/juekunl-arena-eval:n1d7-drilllift        # so OSMO can pull it
 ```
 
